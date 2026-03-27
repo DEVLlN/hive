@@ -164,7 +164,13 @@ draw_status_bar() {
     tput cup "$((TERM_LINES - BAR_LINES + 2))" 0
     printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
     tput cup "$((TERM_LINES - BAR_LINES + 2))" 0
-    printf "${BG_DARK} ${FG_CYAN}⬡ hive${RESET}${BG_DARK} ${FG_GRAY}v${VERSION}${RESET}${BG_DARK} │ ${FG_GRAY}default: both │ c = claude │ x = codex │ cc/xx = interactive │ collab = auto │ stats │ q${RESET}${BG_DARK}"
+    local mode_display
+    case "$MODE" in
+        claude) mode_display="${FG_GREEN}● claude${RESET}${BG_DARK}" ;;
+        codex)  mode_display="${FG_BLUE}◆ codex${RESET}${BG_DARK}" ;;
+        *)      mode_display="${FG_CYAN}both${RESET}${BG_DARK}" ;;
+    esac
+    printf "${BG_DARK} ${FG_CYAN}⬡ hive${RESET}${BG_DARK} ${FG_GRAY}v${VERSION}${RESET}${BG_DARK} │ ${FG_GRAY}mode:${RESET}${BG_DARK} ${mode_display} ${FG_GRAY}(shift+tab)${RESET}${BG_DARK} │ ${FG_GRAY}c │ x │ cc │ xx │ collab │ stats │ q${RESET}${BG_DARK}"
 
     tput rc
 }
@@ -360,13 +366,80 @@ ask_codex() {
     echo "$text"
 }
 
+# ── Mode management ─────────────────────────────────────────────
+MODE="both"  # default: both, claude, codex
+MODE_COLORS=("${CYAN}" "${GREEN}" "${BLUE}")
+MODE_NAMES=("both" "claude" "codex")
+MODE_LABELS=("${CYAN}both${RESET}" "${GREEN}● claude${RESET}" "${BLUE}◆ codex${RESET}")
+MODE_PROMPTS=("${CYAN}❯${RESET}" "${GREEN}❯${RESET}" "${BLUE}❯${RESET}")
+MODE_INDEX=0
+
+get_mode_label() {
+    echo -e "${MODE_LABELS[$MODE_INDEX]}"
+}
+
+cycle_mode() {
+    MODE_INDEX=$(( (MODE_INDEX + 1) % 3 ))
+    MODE="${MODE_NAMES[$MODE_INDEX]}"
+}
+
+# ── Config persistence ──────────────────────────────────────────
+CONFIG_FILE="$HIVE_DIR/config"
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local saved_mode
+        saved_mode=$(grep '^default_mode=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2)
+        case "$saved_mode" in
+            claude) MODE="claude"; MODE_INDEX=1 ;;
+            codex)  MODE="codex";  MODE_INDEX=2 ;;
+            *)      MODE="both";   MODE_INDEX=0 ;;
+        esac
+    fi
+}
+
+save_config() {
+    echo "default_mode=$MODE" > "$CONFIG_FILE"
+}
+
 # ── Startup ─────────────────────────────────────────────────────
 clear
+
+# First-time setup: pick default mode
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo ""
+    echo -e "  ${BOLD}${CYAN}⬡ hive${RESET} ${DIM}v${VERSION}${RESET} — Multi-AI terminal chat"
+    echo -e "  ${DIM}${PROJECT_NAME} (${GIT_BRANCH})${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Choose your default mode:${RESET}"
+    echo ""
+    echo -e "    ${CYAN}1${RESET}  ${CYAN}both${RESET}    — ask Claude + Codex in parallel ${DIM}(recommended)${RESET}"
+    echo -e "    ${GREEN}2${RESET}  ${GREEN}claude${RESET}  — ask Claude only"
+    echo -e "    ${BLUE}3${RESET}  ${BLUE}codex${RESET}   — ask Codex only"
+    echo ""
+    echo -e "  ${DIM}You can switch anytime with shift+tab or type c/x/both${RESET}"
+    echo ""
+    echo -ne "  ${BOLD}Pick [1/2/3]:${RESET} "
+    read -r mode_choice
+    case "$mode_choice" in
+        2) MODE="claude"; MODE_INDEX=1 ;;
+        3) MODE="codex";  MODE_INDEX=2 ;;
+        *) MODE="both";   MODE_INDEX=0 ;;
+    esac
+    save_config
+    echo ""
+    echo -e "  ${DIM}Default set to$(get_mode_label). Saved to ${CONFIG_FILE}${RESET}"
+    sleep 1
+    clear
+else
+    load_config
+fi
+
 setup_scroll_region
 
 echo ""
 echo -e "  ${BOLD}${CYAN}⬡ hive${RESET} ${DIM}v${VERSION}${RESET} — Multi-AI terminal chat"
-echo -e "  ${DIM}${PROJECT_NAME} (${GIT_BRANCH})${RESET}"
+echo -e "  ${DIM}${PROJECT_NAME} (${GIT_BRANCH}) │ mode:$(get_mode_label) ${DIM}(shift+tab to cycle)${RESET}"
 echo ""
 
 draw_status_bar
@@ -374,14 +447,65 @@ draw_status_bar
 # Session marker
 printf -- '---\n## Session %s\n\n' "$SESSION_ID" >> "$HISTORY_FILE"
 
+# ── Custom read with shift+tab detection ────────────────────────
+read_with_mode_toggle() {
+    # Read input char by char to detect shift+tab (ESC [ Z)
+    local input=""
+    local char
+
+    # Show prompt with current mode indicator
+    echo -ne "${MODE_PROMPTS[$MODE_INDEX]} "
+
+    while IFS= read -rsn1 char; do
+        case "$char" in
+            $'\x1b')
+                # Escape sequence — read next chars
+                IFS= read -rsn1 -t 0.1 char2 || true
+                IFS= read -rsn1 -t 0.1 char3 || true
+                if [[ "$char2" == "[" && "$char3" == "Z" ]]; then
+                    # Shift+Tab detected — cycle mode
+                    cycle_mode
+                    save_config
+                    # Redraw prompt line
+                    printf "\r\033[2K"
+                    echo -ne "${MODE_PROMPTS[$MODE_INDEX]} ${input}"
+                else
+                    # Other escape sequence, ignore
+                    :
+                fi
+                ;;
+            "")
+                # Enter pressed
+                echo ""
+                break
+                ;;
+            $'\x7f'|$'\b')
+                # Backspace
+                if [[ -n "$input" ]]; then
+                    input="${input%?}"
+                    printf "\b \b"
+                fi
+                ;;
+            *)
+                input+="$char"
+                printf '%s' "$char"
+                ;;
+        esac
+    done
+
+    REPLY="$input"
+}
+
 # ── Main loop ───────────────────────────────────────────────────
 while true; do
     # Separator line above prompt
     printf "${DIM}"
     printf '%.0s─' $(seq 1 "$TERM_COLS")
     printf "${RESET}\n"
-    echo -ne "${GREEN}❯${RESET} "
-    read -r input || break
+
+    read_with_mode_toggle
+    input="$REPLY"
+
     # Separator line below prompt
     printf "${DIM}"
     printf '%.0s─' $(seq 1 "$TERM_COLS")
@@ -393,6 +517,24 @@ while true; do
     cmd="${input%% *}"
     rest="${input#* }"
     [[ "$cmd" == "$input" ]] && rest=""
+
+    # Check for explicit mode prefix, otherwise use current mode
+    case "$cmd" in
+        c|claude|x|codex|cc|xx|collab|history|stats|clear|q|quit|exit)
+            ;; # handled below as before
+        both)
+            # Explicit "both" prefix
+            cmd="both_explicit"
+            ;;
+        *)
+            # No prefix — route based on current mode
+            case "$MODE" in
+                claude) cmd="c"; rest="$input" ;;
+                codex)  cmd="x"; rest="$input" ;;
+                both)   cmd="both_default"; rest="$input" ;;
+            esac
+            ;;
+    esac
 
     case "$cmd" in
         c|claude)
@@ -480,13 +622,13 @@ while true; do
             break
             ;;
 
-        *)
-            # DEFAULT: ask BOTH in parallel
-            log_history "You → Both" "$input"
+        both_default|both_explicit)
+            # Ask BOTH in parallel
+            log_history "You → Both" "$rest"
 
-            ask_claude "$input" > /tmp/hive-claude-both.txt 2>/dev/null &
+            ask_claude "$rest" > /tmp/hive-claude-both.txt 2>/dev/null &
             CPID=$!
-            ask_codex "$input" > /tmp/hive-codex-both.txt 2>/dev/null &
+            ask_codex "$rest" > /tmp/hive-codex-both.txt 2>/dev/null &
             XPID=$!
 
             # Show dual spinner while both think
