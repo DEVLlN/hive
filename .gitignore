@@ -1,0 +1,4 @@
+.hive/
+.DS_Store
+/tmp/
+*.log

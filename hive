@@ -1,0 +1,209 @@
+#!/bin/bash
+# hive — Multi-AI terminal chat. Talk to Claude and Codex from one prompt.
+#
+# Usage:
+#   hive [working-dir]
+#
+# Default: messages go to BOTH agents in parallel.
+# Prefix with c or x to target one.
+#
+# Commands:
+#   <message>       — Ask BOTH (default)
+#   c <message>     — Ask Claude only
+#   x <message>     — Ask Codex only
+#   cc              — Drop into interactive Claude session (full context)
+#   xx              — Drop into interactive Codex session
+#   collab <task>   — Launch autonomous agent-to-agent collaboration
+#   history         — Show conversation so far
+#   clear           — Clear conversation history
+#   q               — Quit
+
+set -euo pipefail
+
+VERSION="0.1.0"
+CWD="${1:-$(pwd)}"
+
+# ── Colors ───────────────────────────────────────────────────────
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── Config ───────────────────────────────────────────────────────
+HIVE_DIR="${HIVE_DIR:-$CWD/.hive}"
+HIVE_CLAUDE_MODEL="${HIVE_CLAUDE_MODEL:-claude-opus-4-6}"
+HIVE_CLAUDE_FLAGS="${HIVE_CLAUDE_FLAGS:---print --model $HIVE_CLAUDE_MODEL}"
+HIVE_CODEX_FLAGS="${HIVE_CODEX_FLAGS:---full-auto --ephemeral}"
+HIVE_CONTEXT_LINES="${HIVE_CONTEXT_LINES:-20}"
+HIVE_ENSEMBLE_DIR="${HIVE_ENSEMBLE_DIR:-$HOME/ensemble}"
+
+mkdir -p "$HIVE_DIR"
+HISTORY_FILE="$HIVE_DIR/conversation.md"
+SESSION_ID="$(date +%Y%m%d_%H%M%S)"
+
+# ── Context builder ─────────────────────────────────────────────
+build_context() {
+    local msg="$1"
+    local ctx=""
+
+    # Project context
+    if [[ -f "$CWD/CLAUDE.md" ]]; then
+        ctx="You are working in $CWD. Read CLAUDE.md for project context. "
+    fi
+
+    # Cross-session memory (search common paths)
+    for mem in \
+        "$HOME/.claude/projects/-$(echo "$CWD" | tr '/' '-')/memory/MEMORY.md" \
+        "$HOME/.claude/projects/-Users-$(whoami)/memory/MEMORY.md"; do
+        if [[ -f "$mem" ]]; then
+            ctx="${ctx}Read $mem for cross-session learnings. "
+            break
+        fi
+    done
+
+    # Conversation history
+    if [[ -f "$HISTORY_FILE" ]] && [[ -s "$HISTORY_FILE" ]]; then
+        local tail_ctx
+        tail_ctx=$(tail -"$HIVE_CONTEXT_LINES" "$HISTORY_FILE" | tr '\n' ' ')
+        ctx="${ctx}Recent conversation: ${tail_ctx} "
+    fi
+
+    printf '%s\n\nNow answer: %s' "$ctx" "$msg"
+}
+
+# ── History logger ──────────────────────────────────────────────
+log_history() {
+    printf '### %s [%s]\n%s\n\n' "$1" "$(date +%H:%M:%S)" "$2" >> "$HISTORY_FILE"
+}
+
+# ── Agent callers ───────────────────────────────────────────────
+ask_claude() {
+    local ctx
+    ctx=$(build_context "$1")
+    # shellcheck disable=SC2086
+    claude $HIVE_CLAUDE_FLAGS -C "$CWD" "$ctx" 2>/dev/null
+}
+
+ask_codex() {
+    local ctx
+    ctx=$(build_context "$1")
+    # shellcheck disable=SC2086
+    codex exec $HIVE_CODEX_FLAGS -C "$CWD" -o /tmp/hive-codex-out.txt "$ctx" 2>/dev/null
+    cat /tmp/hive-codex-out.txt 2>/dev/null
+}
+
+# ── Header ──────────────────────────────────────────────────────
+echo -e "${BOLD}${CYAN}⬡ hive${RESET} ${DIM}v${VERSION}${RESET} — Multi-AI terminal chat"
+echo -e "${DIM}  default = both | c = claude | x = codex | cc/xx = interactive | collab = autonomous${RESET}"
+echo -e "${DIM}  dir: ${CWD}${RESET}"
+echo ""
+
+# Session marker
+printf -- '---\n## Session %s\n\n' "$SESSION_ID" >> "$HISTORY_FILE"
+
+# ── Main loop ───────────────────────────────────────────────────
+while true; do
+    echo -ne "${CYAN}⬡${RESET} "
+    read -r input || break
+    [[ -z "$input" ]] && continue
+
+    cmd="${input%% *}"
+    rest="${input#* }"
+    [[ "$cmd" == "$input" ]] && rest=""
+
+    case "$cmd" in
+        c|claude)
+            [[ -z "$rest" ]] && { echo -e "${DIM}Usage: c <message>${RESET}"; continue; }
+            log_history "You → Claude" "$rest"
+            echo -e "${GREEN}● Claude:${RESET}"
+            response=$(ask_claude "$rest")
+            echo "$response"
+            log_history "Claude" "$response"
+            echo ""
+            ;;
+
+        x|codex)
+            [[ -z "$rest" ]] && { echo -e "${DIM}Usage: x <message>${RESET}"; continue; }
+            log_history "You → Codex" "$rest"
+            echo -e "${BLUE}◆ Codex:${RESET}"
+            response=$(ask_codex "$rest")
+            echo "$response"
+            log_history "Codex" "$response"
+            echo ""
+            ;;
+
+        cc)
+            echo -e "${DIM}Entering Claude interactive (full context, skills, hooks)...${RESET}"
+            (cd "$CWD" && claude --model "$HIVE_CLAUDE_MODEL" --dangerously-skip-permissions)
+            echo -e "${DIM}Back in hive${RESET}"
+            ;;
+
+        xx)
+            echo -e "${DIM}Entering Codex interactive...${RESET}"
+            (cd "$CWD" && codex)
+            echo -e "${DIM}Back in hive${RESET}"
+            ;;
+
+        collab)
+            [[ -z "$rest" ]] && { echo -e "${DIM}Usage: collab <task>${RESET}"; continue; }
+            log_history "You → Collab" "$rest"
+            if [[ -d "$HIVE_ENSEMBLE_DIR" ]]; then
+                echo -e "${DIM}Launching autonomous collab...${RESET}"
+                (cd "$HIVE_ENSEMBLE_DIR" && node bin/ensemble.cjs run "$rest" --agents claude,codex) &
+                sleep 3
+                echo -e "${DIM}Monitor: cd $HIVE_ENSEMBLE_DIR && node bin/ensemble.cjs monitor --latest${RESET}"
+            else
+                echo -e "${DIM}Ensemble not found at $HIVE_ENSEMBLE_DIR. Set HIVE_ENSEMBLE_DIR.${RESET}"
+            fi
+            ;;
+
+        history)
+            if [[ -f "$HISTORY_FILE" ]] && [[ -s "$HISTORY_FILE" ]]; then
+                echo -e "${DIM}─── Conversation History ───${RESET}"
+                cat "$HISTORY_FILE"
+                echo -e "${DIM}────────────────────────────${RESET}"
+            else
+                echo -e "${DIM}No history yet${RESET}"
+            fi
+            ;;
+
+        clear)
+            : > "$HISTORY_FILE"
+            echo -e "${DIM}History cleared${RESET}"
+            ;;
+
+        q|quit|exit)
+            echo -e "${DIM}bye${RESET}"
+            break
+            ;;
+
+        *)
+            # DEFAULT: ask both in parallel
+            log_history "You → Both" "$input"
+
+            ask_claude "$input" > /tmp/hive-claude-out.txt 2>/dev/null &
+            CPID=$!
+            ask_codex "$input" > /tmp/hive-codex-both.txt 2>/dev/null &
+            XPID=$!
+
+            echo -e "${DIM}asking both...${RESET}"
+
+            wait $CPID 2>/dev/null
+            echo -e "${GREEN}● Claude:${RESET}"
+            c_resp=$(cat /tmp/hive-claude-out.txt 2>/dev/null)
+            echo "$c_resp"
+            log_history "Claude" "$c_resp"
+            echo ""
+
+            wait $XPID 2>/dev/null
+            echo -e "${BLUE}◆ Codex:${RESET}"
+            x_resp=$(cat /tmp/hive-codex-both.txt 2>/dev/null)
+            echo "$x_resp"
+            log_history "Codex" "$x_resp"
+            echo ""
+            ;;
+    esac
+done
