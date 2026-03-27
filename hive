@@ -145,7 +145,12 @@ draw_status_bar() {
     tput cup "$((TERM_LINES - BAR_LINES))" 0
     printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
     tput cup "$((TERM_LINES - BAR_LINES))" 0
-    printf "${BG_DARK} ${FG_GREEN}● Claude${RESET}${BG_DARK}  ${FG_GREEN}Opus 4.6 (1M context)${RESET}${BG_DARK} │ ${c_color}${c_bar}${RESET}${BG_DARK} ${FG_WHITE}${c_ctx_pct}%%${RESET}${BG_DARK} │ ${FG_GRAY}cost${RESET}${BG_DARK} ${FG_WHITE}\$${c_cost}${RESET}${BG_DARK} │ ${FG_GRAY}out${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_OUTPUT}${RESET}${BG_DARK} │ ${FG_GRAY}cache${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_CACHE_READ}${RESET}${BG_DARK} │ ${FG_GRAY}calls${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_CALLS}${RESET}${BG_DARK}"
+    # Show cost only if using API key (not a plan)
+    local claude_cost_section=""
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        claude_cost_section=" │ ${FG_GRAY}cost${RESET}${BG_DARK} ${FG_WHITE}\$${c_cost}${RESET}${BG_DARK}"
+    fi
+    printf "${BG_DARK} ${FG_GREEN}● Claude${RESET}${BG_DARK}  ${FG_GREEN}Opus 4.6 (1M context)${RESET}${BG_DARK} │ ${c_color}${c_bar}${RESET}${BG_DARK} ${FG_WHITE}${c_ctx_pct}%%${RESET}${BG_DARK}${claude_cost_section} │ ${FG_GRAY}out${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_OUTPUT}${RESET}${BG_DARK} │ ${FG_GRAY}cache${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_CACHE_READ}${RESET}${BG_DARK} │ ${FG_GRAY}calls${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_CALLS}${RESET}${BG_DARK}"
 
     # ── Line 2: Codex ──
     tput cup "$((TERM_LINES - BAR_LINES + 1))" 0
