@@ -52,16 +52,22 @@ GIT_BRANCH=$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "—"
 # ── Stats tracking ──────────────────────────────────────────────
 CLAUDE_TOTAL_INPUT=0
 CLAUDE_TOTAL_OUTPUT=0
+CLAUDE_TOTAL_CACHE_READ=0
 CLAUDE_TOTAL_COST="0.00"
 CLAUDE_CALLS=0
-CODEX_TOTAL_TOKENS=0
+CODEX_TOTAL_INPUT=0
+CODEX_TOTAL_CACHED=0
+CODEX_TOTAL_OUTPUT=0
 CODEX_CALLS=0
 TOTAL_QUESTIONS=0
+
+# Detect Codex model from config
+CODEX_MODEL=$(grep '^model' ~/.codex/config.toml 2>/dev/null | head -1 | sed 's/.*= *"//;s/"//' || echo "gpt-5.2-codex")
 
 # ── Terminal setup for bottom bar ───────────────────────────────
 TERM_LINES=$(tput lines)
 TERM_COLS=$(tput cols)
-BAR_LINES=3  # 3-line status bar at bottom
+BAR_LINES=4  # 4-line status bar at bottom
 
 setup_scroll_region() {
     TERM_LINES=$(tput lines)
@@ -85,6 +91,17 @@ trap restore_terminal EXIT
 trap 'TERM_LINES=$(tput lines); TERM_COLS=$(tput cols); draw_status_bar' WINCH
 
 # ── Status bar drawing ──────────────────────────────────────────
+make_bar() {
+    # Usage: make_bar <percent> — returns colored ●○ bar
+    local pct=${1:-0}
+    local filled=$((pct / 10))
+    local empty=$((10 - filled))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="●"; done
+    for ((i=0; i<empty; i++)); do bar+="○"; done
+    echo "$bar"
+}
+
 draw_status_bar() {
     TERM_LINES=$(tput lines)
     TERM_COLS=$(tput cols)
@@ -94,46 +111,60 @@ draw_status_bar() {
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
     local duration="${mins}m${secs}s"
+    local time_now=$(date +"%l:%M%p" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
 
-    # Context usage bar for Claude (out of 1M)
-    local ctx_pct=0
+    # ── Claude context bar ──
+    local c_ctx_pct=0
     if (( CLAUDE_TOTAL_INPUT > 0 )); then
-        ctx_pct=$((CLAUDE_TOTAL_INPUT * 100 / 1000000))
+        c_ctx_pct=$((CLAUDE_TOTAL_INPUT * 100 / 1000000))
     fi
-    local filled=$((ctx_pct / 10))
-    local empty=$((10 - filled))
-    local ctx_bar=""
-    local ctx_color="$FG_GREEN"
-    if (( ctx_pct > 70 )); then ctx_color="$RED"; elif (( ctx_pct > 40 )); then ctx_color="$FG_YELLOW"; fi
-    for ((i=0; i<filled; i++)); do ctx_bar+="●"; done
-    for ((i=0; i<empty; i++)); do ctx_bar+="○"; done
+    local c_bar=$(make_bar $c_ctx_pct)
+    local c_color="$FG_GREEN"
+    if (( c_ctx_pct > 70 )); then c_color="$RED"; elif (( c_ctx_pct > 40 )); then c_color="$FG_YELLOW"; fi
+    local c_cost=$(printf '%.2f' "$CLAUDE_TOTAL_COST" 2>/dev/null || echo "0.00")
 
-    # Cost formatting
-    local cost_fmt
-    cost_fmt=$(printf '%.2f' "$CLAUDE_TOTAL_COST" 2>/dev/null || echo "0.00")
+    # ── Codex context bar (input tokens / 128k context) ──
+    local x_ctx_pct=0
+    local x_total=$((CODEX_TOTAL_INPUT + CODEX_TOTAL_CACHED))
+    if (( x_total > 0 )); then
+        x_ctx_pct=$((x_total * 100 / 128000))
+    fi
+    local x_bar=$(make_bar $x_ctx_pct)
+    local x_color="$FG_BLUE"
+    if (( x_ctx_pct > 70 )); then x_color="$RED"; elif (( x_ctx_pct > 40 )); then x_color="$FG_YELLOW"; fi
 
-    # Save cursor position
+    # Git dirty flag
+    local git_dirty=""
+    if [[ -n $(git -C "$CWD" status --porcelain 2>/dev/null | head -1) ]]; then
+        git_dirty="*"
+    fi
+
     tput sc
 
-    # ── Line 1: Claude stats ──
+    # ── Line 1: Claude ──
     tput cup "$((TERM_LINES - BAR_LINES))" 0
-    printf "${BG_DARK}%${TERM_COLS}s${RESET}" ""  # clear line with bg
+    printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
     tput cup "$((TERM_LINES - BAR_LINES))" 0
-    printf "${BG_DARK} ${FG_GREEN}● Claude${RESET}${BG_DARK} ${FG_GRAY}${HIVE_CLAUDE_MODEL} (1M)${RESET}${BG_DARK} │ ${ctx_color}${ctx_bar}${RESET}${BG_DARK} ${FG_WHITE}${ctx_pct}%%${RESET}${BG_DARK} │ ${FG_GRAY}cost:${RESET}${BG_DARK} ${FG_WHITE}\$${cost_fmt}${RESET}${BG_DARK} │ ${FG_GRAY}out:${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_OUTPUT}${RESET}${BG_DARK} │ ${FG_GRAY}calls:${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_CALLS}${RESET}${BG_DARK}"
+    printf "${BG_DARK} ${FG_GREEN}● Claude${RESET}${BG_DARK}  ${FG_GREEN}Opus 4.6 (1M context)${RESET}${BG_DARK} │ ${c_color}${c_bar}${RESET}${BG_DARK} ${FG_WHITE}${c_ctx_pct}%%${RESET}${BG_DARK} │ ${FG_GRAY}cost${RESET}${BG_DARK} ${FG_WHITE}\$${c_cost}${RESET}${BG_DARK} │ ${FG_GRAY}out${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_OUTPUT}${RESET}${BG_DARK} │ ${FG_GRAY}cache${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_TOTAL_CACHE_READ}${RESET}${BG_DARK} │ ${FG_GRAY}calls${RESET}${BG_DARK} ${FG_WHITE}${CLAUDE_CALLS}${RESET}${BG_DARK}"
 
-    # ── Line 2: Codex stats ──
+    # ── Line 2: Codex ──
     tput cup "$((TERM_LINES - BAR_LINES + 1))" 0
-    printf "${BG_DARK}%${TERM_COLS}s${RESET}" ""
+    printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
     tput cup "$((TERM_LINES - BAR_LINES + 1))" 0
-    printf "${BG_DARK} ${FG_BLUE}◆ Codex${RESET}${BG_DARK}  ${FG_GRAY}gpt-5.2-codex${RESET}${BG_DARK}       │ ${FG_GRAY}tokens:${RESET}${BG_DARK} ${FG_WHITE}${CODEX_TOTAL_TOKENS}${RESET}${BG_DARK} │ ${FG_GRAY}calls:${RESET}${BG_DARK} ${FG_WHITE}${CODEX_CALLS}${RESET}${BG_DARK} │ ${FG_GRAY}questions:${RESET}${BG_DARK} ${FG_WHITE}${TOTAL_QUESTIONS}${RESET}${BG_DARK} │ ${FG_GRAY}session:${RESET}${BG_DARK} ${FG_WHITE}${duration}${RESET}${BG_DARK}"
+    printf "${BG_DARK} ${FG_BLUE}◆ Codex${RESET}${BG_DARK}   ${FG_BLUE}${CODEX_MODEL} (128k)${RESET}${BG_DARK}  │ ${x_color}${x_bar}${RESET}${BG_DARK} ${FG_WHITE}${x_ctx_pct}%%${RESET}${BG_DARK} │ ${FG_GRAY}in${RESET}${BG_DARK} ${FG_WHITE}${CODEX_TOTAL_INPUT}${RESET}${BG_DARK} │ ${FG_GRAY}out${RESET}${BG_DARK} ${FG_WHITE}${CODEX_TOTAL_OUTPUT}${RESET}${BG_DARK} │ ${FG_GRAY}cached${RESET}${BG_DARK} ${FG_WHITE}${CODEX_TOTAL_CACHED}${RESET}${BG_DARK} │ ${FG_GRAY}calls${RESET}${BG_DARK} ${FG_WHITE}${CODEX_CALLS}${RESET}${BG_DARK}"
 
-    # ── Line 3: Project info ──
+    # ── Line 3: Session ──
     tput cup "$((TERM_LINES - BAR_LINES + 2))" 0
-    printf "${BG_DARK}%${TERM_COLS}s${RESET}" ""
+    printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
     tput cup "$((TERM_LINES - BAR_LINES + 2))" 0
-    printf "${BG_DARK} ${FG_CYAN}⬡ hive${RESET}${BG_DARK} ${FG_GRAY}v${VERSION}${RESET}${BG_DARK} │ ${FG_MAGENTA}${PROJECT_NAME}${RESET}${BG_DARK} ${FG_GRAY}(${GIT_BRANCH})${RESET}${BG_DARK} │ ${FG_GRAY}default: both${RESET}${BG_DARK} │ ${FG_GRAY}c = claude │ x = codex │ cc/xx = interactive │ collab = autonomous${RESET}${BG_DARK}"
+    printf "${BG_DARK} ${FG_GRAY}questions${RESET}${BG_DARK} ${FG_WHITE}${TOTAL_QUESTIONS}${RESET}${BG_DARK} │ ${FG_GRAY}session${RESET}${BG_DARK} ${FG_WHITE}${duration}${RESET}${BG_DARK} │ ${FG_GRAY}time${RESET}${BG_DARK} ${FG_WHITE}${time_now}${RESET}${BG_DARK} │ ${FG_GRAY}history${RESET}${BG_DARK} ${FG_WHITE}${HISTORY_FILE}${RESET}${BG_DARK}"
 
-    # Restore cursor
+    # ── Line 4: Project + commands ──
+    tput cup "$((TERM_LINES - BAR_LINES + 3))" 0
+    printf "${BG_DARK}%-${TERM_COLS}s${RESET}" ""
+    tput cup "$((TERM_LINES - BAR_LINES + 3))" 0
+    printf "${BG_DARK} ${FG_CYAN}⬡ hive${RESET}${BG_DARK} ${FG_GRAY}v${VERSION}${RESET}${BG_DARK} │ ${FG_MAGENTA}${PROJECT_NAME}${RESET}${BG_DARK} ${FG_GRAY}(${GIT_BRANCH}${git_dirty})${RESET}${BG_DARK} │ ${FG_GRAY}default: both │ c = claude │ x = codex │ cc/xx = interactive │ collab = auto${RESET}${BG_DARK}"
+
     tput rc
 }
 
@@ -193,8 +224,12 @@ ask_claude() {
     output_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(int(d.get('usage',{}).get('output_tokens',0)))" 2>/dev/null || echo 0)
     cost=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('total_cost_usd',0))" 2>/dev/null || echo 0)
 
+    local cache_read
+    cache_read=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(int(d.get('usage',{}).get('cache_read_input_tokens',0)))" 2>/dev/null || echo 0)
+
     CLAUDE_TOTAL_INPUT=$((CLAUDE_TOTAL_INPUT + ${input_tokens:-0}))
     CLAUDE_TOTAL_OUTPUT=$((CLAUDE_TOTAL_OUTPUT + ${output_tokens:-0}))
+    CLAUDE_TOTAL_CACHE_READ=$((CLAUDE_TOTAL_CACHE_READ + ${cache_read:-0}))
     CLAUDE_TOTAL_COST=$(python3 -c "print(round(${CLAUDE_TOTAL_COST} + ${cost:-0}, 4))" 2>/dev/null || echo "$CLAUDE_TOTAL_COST")
     CLAUDE_CALLS=$((CLAUDE_CALLS + 1))
 
@@ -213,12 +248,15 @@ ask_codex() {
     local text
     text=$(cat /tmp/hive-codex-out.txt 2>/dev/null)
 
-    # Try to get token count
-    local tokens
-    tokens=$(grep -o '"total_tokens":[0-9]*' "$tmpout" 2>/dev/null | tail -1 | grep -o '[0-9]*' || echo 0)
-    [[ -z "$tokens" ]] && tokens=0
+    # Extract detailed token stats from JSON stream
+    local input_t cached_t output_t
+    input_t=$(grep -o '"input_tokens":[0-9]*' "$tmpout" 2>/dev/null | tail -1 | grep -o '[0-9]*' || echo 0)
+    cached_t=$(grep -o '"cached_input_tokens":[0-9]*' "$tmpout" 2>/dev/null | tail -1 | grep -o '[0-9]*' || echo 0)
+    output_t=$(grep -o '"output_tokens":[0-9]*' "$tmpout" 2>/dev/null | tail -1 | grep -o '[0-9]*' || echo 0)
 
-    CODEX_TOTAL_TOKENS=$((CODEX_TOTAL_TOKENS + tokens))
+    CODEX_TOTAL_INPUT=$((CODEX_TOTAL_INPUT + ${input_t:-0}))
+    CODEX_TOTAL_CACHED=$((CODEX_TOTAL_CACHED + ${cached_t:-0}))
+    CODEX_TOTAL_OUTPUT=$((CODEX_TOTAL_OUTPUT + ${output_t:-0}))
     CODEX_CALLS=$((CODEX_CALLS + 1))
 
     echo "$text"
