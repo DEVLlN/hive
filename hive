@@ -169,6 +169,103 @@ draw_status_bar() {
     tput rc
 }
 
+# ── Thinking spinners ───────────────────────────────────────────
+# Claude-style verbs
+CLAUDE_VERBS=("Pondering" "Thinking" "Reasoning" "Analyzing" "Considering" "Evaluating" "Reflecting")
+CODEX_VERBS=("Processing" "Computing" "Generating" "Resolving" "Synthesizing" "Working" "Inferring")
+
+spin_claude() {
+    # Usage: spin_claude &   then kill $! when done
+    local pid_file="$1"
+    local start=$(date +%s)
+    local i=0
+    local verb_idx=$((RANDOM % ${#CLAUDE_VERBS[@]}))
+    local verb="${CLAUDE_VERBS[$verb_idx]}"
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+
+    while true; do
+        local elapsed=$(( $(date +%s) - start ))
+        local s=$((elapsed % 60))
+        local m=$((elapsed / 60))
+        local time_str
+        if (( m > 0 )); then
+            time_str="${m}m ${s}s"
+        else
+            time_str="${s}s"
+        fi
+
+        # Rotate verb every 15s
+        if (( elapsed > 0 && elapsed % 15 == 0 )); then
+            verb_idx=$(( (verb_idx + 1) % ${#CLAUDE_VERBS[@]} ))
+            verb="${CLAUDE_VERBS[$verb_idx]}"
+        fi
+
+        local frame="${frames[$((i % ${#frames[@]}))]}"
+        printf "\r${GREEN}${frame} ${verb}…${RESET} ${DIM}(${time_str})${RESET}  "
+        i=$((i + 1))
+        sleep 0.2
+    done
+}
+
+spin_codex() {
+    local pid_file="$1"
+    local start=$(date +%s)
+    local i=0
+    local verb_idx=$((RANDOM % ${#CODEX_VERBS[@]}))
+    local verb="${CODEX_VERBS[$verb_idx]}"
+    local frames=("◇" "◈" "◆" "◈")
+
+    while true; do
+        local elapsed=$(( $(date +%s) - start ))
+        local s=$((elapsed % 60))
+        local m=$((elapsed / 60))
+        local time_str
+        if (( m > 0 )); then
+            time_str="${m}m ${s}s"
+        else
+            time_str="${s}s"
+        fi
+
+        if (( elapsed > 0 && elapsed % 15 == 0 )); then
+            verb_idx=$(( (verb_idx + 1) % ${#CODEX_VERBS[@]} ))
+            verb="${CODEX_VERBS[$verb_idx]}"
+        fi
+
+        local frame="${frames[$((i % ${#frames[@]}))]}"
+        printf "\r${BLUE}${frame} ${verb}…${RESET} ${DIM}(${time_str})${RESET}  "
+        i=$((i + 1))
+        sleep 0.3
+    done
+}
+
+spin_both() {
+    local start=$(date +%s)
+    local i=0
+    local c_verb_idx=$((RANDOM % ${#CLAUDE_VERBS[@]}))
+    local x_verb_idx=$((RANDOM % ${#CODEX_VERBS[@]}))
+    local c_frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    local x_frames=("◇" "◈" "◆" "◈")
+
+    while true; do
+        local elapsed=$(( $(date +%s) - start ))
+        local s=$((elapsed % 60))
+        local m=$((elapsed / 60))
+        local time_str
+        if (( m > 0 )); then time_str="${m}m ${s}s"; else time_str="${s}s"; fi
+
+        if (( elapsed > 0 && elapsed % 12 == 0 )); then
+            c_verb_idx=$(( (c_verb_idx + 1) % ${#CLAUDE_VERBS[@]} ))
+            x_verb_idx=$(( (x_verb_idx + 1) % ${#CODEX_VERBS[@]} ))
+        fi
+
+        local cf="${c_frames[$((i % ${#c_frames[@]}))]}"
+        local xf="${x_frames[$((i % ${#x_frames[@]}))]}"
+        printf "\r${GREEN}${cf} ${CLAUDE_VERBS[$c_verb_idx]}…${RESET}  ${BLUE}${xf} ${CODEX_VERBS[$x_verb_idx]}…${RESET}  ${DIM}(${time_str})${RESET}    "
+        i=$((i + 1))
+        sleep 0.25
+    done
+}
+
 # ── Context builder ─────────────────────────────────────────────
 build_context() {
     local msg="$1"
@@ -301,8 +398,12 @@ while true; do
         c|claude)
             [[ -z "$rest" ]] && { echo -e "${DIM}Usage: c <message>${RESET}"; continue; }
             log_history "You → Claude" "$rest"
-            echo -e "${GREEN}● Claude:${RESET}"
+            spin_claude &
+            SPIN_PID=$!
             response=$(ask_claude "$rest")
+            kill $SPIN_PID 2>/dev/null; wait $SPIN_PID 2>/dev/null
+            printf "\r\033[2K"  # clear spinner line
+            echo -e "${GREEN}● Claude:${RESET}"
             echo "$response"
             log_history "Claude" "$response"
             echo ""
@@ -312,8 +413,12 @@ while true; do
         x|codex)
             [[ -z "$rest" ]] && { echo -e "${DIM}Usage: x <message>${RESET}"; continue; }
             log_history "You → Codex" "$rest"
-            echo -e "${BLUE}◆ Codex:${RESET}"
+            spin_codex &
+            SPIN_PID=$!
             response=$(ask_codex "$rest")
+            kill $SPIN_PID 2>/dev/null; wait $SPIN_PID 2>/dev/null
+            printf "\r\033[2K"
+            echo -e "${BLUE}◆ Codex:${RESET}"
             echo "$response"
             log_history "Codex" "$response"
             echo ""
@@ -384,18 +489,32 @@ while true; do
             ask_codex "$input" > /tmp/hive-codex-both.txt 2>/dev/null &
             XPID=$!
 
-            echo -e "${DIM}asking both...${RESET}"
-            echo ""
+            # Show dual spinner while both think
+            spin_both &
+            SPIN_PID=$!
 
+            # Wait for Claude first (usually faster)
             wait $CPID 2>/dev/null
+            kill $SPIN_PID 2>/dev/null; wait $SPIN_PID 2>/dev/null
+            printf "\r\033[2K"
+
             echo -e "${GREEN}● Claude:${RESET}"
             c_resp=$(cat /tmp/hive-claude-both.txt 2>/dev/null)
             echo "$c_resp"
             log_history "Claude" "$c_resp"
-
             echo ""
 
-            wait $XPID 2>/dev/null
+            # Show codex spinner if still running
+            if kill -0 $XPID 2>/dev/null; then
+                spin_codex &
+                SPIN_PID=$!
+                wait $XPID 2>/dev/null
+                kill $SPIN_PID 2>/dev/null; wait $SPIN_PID 2>/dev/null
+                printf "\r\033[2K"
+            else
+                wait $XPID 2>/dev/null
+            fi
+
             echo -e "${BLUE}◆ Codex:${RESET}"
             x_resp=$(cat /tmp/hive-codex-both.txt 2>/dev/null)
             echo "$x_resp"
