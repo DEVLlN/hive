@@ -240,7 +240,7 @@ printf -- '---\n## Session %s\n\n' "$SESSION_ID" >> "$HISTORY_FILE"
 
 # ── Main loop ───────────────────────────────────────────────────
 while true; do
-    echo -ne "${CYAN}⬡${RESET} "
+    echo -ne "${GREEN}❯${RESET} "
     read -r input || break
     [[ -z "$input" ]] && continue
 
